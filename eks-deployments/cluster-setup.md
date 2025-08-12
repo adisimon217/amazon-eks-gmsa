@@ -44,43 +44,71 @@ kubectl version --client
 eksctl version
 ```
 
-## Step 2: Create EKS Cluster
+## Step 2: Set Configuration Parameters
+
+```bash
+##### ACTION REQUIRED - START #####
+REGION="ap-southeast-1" # AWS region where cluster will be created
+SSH_KEY="sandbox-sg-pem" # Your existing AWS key pair name
+PRIVATE_SUBNETS="subnet-05e7df1325d2227f5,subnet-04c89c31213a7cec0" # Private subnet IDs (comma separated)
+##### ACTION REQUIRED - END #####
+
+##### DEFAULT VALUES - START #####
+CLUSTER_NAME="gmsa-eks" # EKS cluster name
+WINDOWS_NODE_TYPE="m5.large" # Windows node instance type
+WINDOWS_NODE_COUNT="2" # Number of Windows nodes
+WINDOWS_AMI_FAMILY="WindowsServer2019FullContainer" # Windows AMI family
+##### DEFAULT VALUES - END #####
+```
+
+## Step 3: Create EKS Cluster
 
 ### Create the cluster with Linux nodes (using existing VPC)
 ```bash
 eksctl create cluster \
-  --name gmsa-eks \
-  --region ap-southeast-1 \
+  --name $CLUSTER_NAME \
+  --region $REGION \
   --with-oidc \
   --ssh-access \
-  --ssh-public-key sandbox-sg-pem \
-  --vpc-private-subnets subnet-05e7df1325d2227f5,subnet-04c89c31213a7cec0 \
-  --node-private-networking \
-  --managed
+  --ssh-public-key $SSH_KEY \
+  --vpc-private-subnets $PRIVATE_SUBNETS \
+  --node-private-networking
 ```
 
-## Step 3: Add Windows Node Group
+**Note:** Using unmanaged node groups (no `--managed` flag) to create AutoScaling Groups for easier domain joining.
+
+**OPTIONAL: To upgrade cluster later:**
+```bash
+# Check available versions
+eksctl get cluster --name $CLUSTER_NAME --region $REGION
+
+# Upgrade to specific version
+eksctl upgrade cluster --name $CLUSTER_NAME --region $REGION --version 1.33
+```
+
+## Step 4: Add Windows Node Group
 
 ```bash
 eksctl create nodegroup \
-  --cluster gmsa-eks \
-  --region ap-southeast-1 \
+  --cluster $CLUSTER_NAME \
+  --region $REGION \
   --name windows-nodes \
-  --node-type m5.large \
-  --nodes 2 \
-  --subnets subnet-05e7df1325d2227f5,subnet-04c89c31213a7cec0 \
-  --node-ami-family WindowsServer2019FullContainer
+  --node-type $WINDOWS_NODE_TYPE \
+  --nodes $WINDOWS_NODE_COUNT \
+  --subnet-ids $PRIVATE_SUBNETS \
+  --node-private-networking \
+  --node-ami-family $WINDOWS_AMI_FAMILY
 ```
 
 **Note:** Windows nodes are placed in private subnets across two AZs for security and availability.
 
-## Step 4: Configure kubectl
+## Step 5: Configure kubectl
 
 ```bash
-aws eks update-kubeconfig --region ap-southeast-1 --name gmsa-workshop
+aws eks update-kubeconfig --region $REGION --name $CLUSTER_NAME
 ```
 
-## Step 5: Verify Cluster Setup
+## Step 6: Verify Cluster Setup
 
 ```bash
 # Check cluster status
@@ -88,9 +116,30 @@ kubectl get nodes
 
 # Verify both Linux and Windows nodes are present
 kubectl get nodes -o wide
+
+# Check Kubernetes version
+kubectl version
 ```
 
 You should see both Linux and Windows nodes in the output.
+
+## Step 7: gMSA Feature Gates (Optional)
+
+**For Kubernetes 1.18+**: gMSA is GA and enabled by default - no feature gates needed.
+
+**For older versions only**: If your cluster runs Kubernetes < 1.18, you would need to enable feature gates by modifying the kubelet configuration on Windows nodes:
+
+```bash
+# This is only needed for Kubernetes < 1.18
+# Add to kubelet configuration on Windows nodes:
+# --feature-gates=WindowsGMSA=true
+```
+
+**Check if feature gates are needed:**
+```bash
+# If server version is 1.18+, you're good to go
+kubectl version | grep "Server Version"
+```
 
 ## Next Steps
 
@@ -107,7 +156,7 @@ When you're done with the workshop, clean up resources:
 
 ```bash
 # Delete the cluster (this will delete all node groups too)
-eksctl delete cluster --name gmsa-workshop --region ap-southeast-1
+eksctl delete cluster --name $CLUSTER_NAME --region $REGION
 ```
 
 ## Troubleshooting
