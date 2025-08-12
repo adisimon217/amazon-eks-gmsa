@@ -31,7 +31,7 @@ $credspecResourceName = "foouser1resource" # Custom resourcename in the kubernet
 
 ### Customer Managed Key
 ```powershell
-$cmkstack = aws cloudformation create-stack --stack-name cmkstack --template-body file://kms-custom-cmk.yaml --parameters ParameterKey=CMKAlias,ParameterValue="gMSAKey" ParameterKey=CMKDescription,ParameterValue="Encrypt or Decrypt gMSA active directory admin password" --output text
+$cmkstack = aws cloudformation create-stack --stack-name cmkstack --template-body file://kms-custom-cmk.yaml --parameters 'ParameterKey=CMKAlias,ParameterValue=gMSAKey' 'ParameterKey=CMKDescription,ParameterValue=Encrypt or Decrypt gMSA active directory admin password' --output text
 
 # Wait for the cloud formation to be completed
 aws cloudformation describe-stack-events --stack-name $cmkstack
@@ -65,7 +65,7 @@ aws ssm put-parameter --name "$adUserPasswordParam" --value "$adUserPassword" --
 ### Create AWS Managed AD
 #### AD Creation takes about ~20 minutes. If you have your own AD, please use that.
 ```powershell
-$adstack = aws cloudformation create-stack --stack-name gmsaADstack --template-body file://aws_managed_ad_cloudformation.yaml --parameters ParameterKey=DirectoryNameParameter,ParameterValue="$directoryNameParam" ParameterKey=ShortName,ParameterValue="$adDirectoryShortName" ParameterKey=Subnets,ParameterValue="$subnets" ParameterKey=VpcId,ParameterValue="$vpcId" --output text
+$adstack = aws cloudformation create-stack --stack-name gmsaADstack --template-body file://aws_managed_ad_cloudformation.yaml --parameters "ParameterKey=DirectoryNameParameter,ParameterValue=$directoryNameParam" "ParameterKey=ShortName,ParameterValue=$adDirectoryShortName" "ParameterKey=Subnets,ParameterValue=$subnets" "ParameterKey=VpcId,ParameterValue=$vpcId" --output text
 
 # Validate the stack creation
 aws cloudformation describe-stack-events --stack-name $adstack
@@ -79,7 +79,7 @@ aws ssm put-parameter --name "$dnsIPAddressesParam" --value  $dnsIPAddresses --t
 ### Generate SSM Documents
 * GMSA-DomainJoin-Document
 ```powershell
-$domainjoinSSMStack = aws cloudformation create-stack --stack-name gmsaDomainJoinSSM --template-body file://ssm-document-domain-join.yaml --parameters ParameterKey=DirectoryNameParameter,ParameterValue="$directoryNameParam" ParameterKey=ADUserNameParameter,ParameterValue="$adUserParam" ParameterKey=ADUserPasswordParameter,ParameterValue="$adUserPasswordParam" ParameterKey=ADDNSIPAddressesParameter,ParameterValue="$dnsIPAddressesParam" ParameterKey=gMSAADSecurityGroup,ParameterValue="$gMSAADSecurityGroup" --output text
+$domainjoinSSMStack = aws cloudformation create-stack --stack-name gmsaDomainJoinSSM --template-body file://ssm-document-domain-join.yaml --parameters "ParameterKey=DirectoryNameParameter,ParameterValue=$directoryNameParam" "ParameterKey=ADUserNameParameter,ParameterValue=$adUserParam" "ParameterKey=ADUserPasswordParameter,ParameterValue=$adUserPasswordParam" "ParameterKey=ADDNSIPAddressesParameter,ParameterValue=$dnsIPAddressesParam" "ParameterKey=gMSAADSecurityGroup,ParameterValue=$gMSAADSecurityGroup" --output text
  
 aws cloudformation describe-stack-events --stack-name $domainjoinSSMStack
  
@@ -88,7 +88,7 @@ $domainjoinSSMdoc = aws cloudformation describe-stacks --stack-name $domainjoinS
 
 * GMSA-CreateAndJoinADSecurityGroup-Document
 ```powershell
-$adGroupCreateSSMStack = aws cloudformation create-stack --stack-name gmsaADSecurityGroupSSM --template-body file://ssm-document-adgroup-createandjoin.yaml --parameters ParameterKey=DirectoryNameParameter,ParameterValue="$directoryNameParam" ParameterKey=ADUserNameParameter,ParameterValue="$adUserParam" ParameterKey=ADUserPasswordParameter,ParameterValue="$adUserPasswordParam" ParameterKey=gMSAADSecurityGroup,ParameterValue="$gMSAADSecurityGroup" --output text
+$adGroupCreateSSMStack = aws cloudformation create-stack --stack-name gmsaADSecurityGroupSSM --template-body file://ssm-document-adgroup-createandjoin.yaml --parameters "ParameterKey=DirectoryNameParameter,ParameterValue=$directoryNameParam" "ParameterKey=ADUserNameParameter,ParameterValue=$adUserParam" "ParameterKey=ADUserPasswordParameter,ParameterValue=$adUserPasswordParam" "ParameterKey=gMSAADSecurityGroup,ParameterValue=$gMSAADSecurityGroup" --output text
 
 aws cloudformation describe-stack-events --stack-name $adGroupCreateSSMStack
 
@@ -97,7 +97,7 @@ $adGroupCreateSSMdoc = aws cloudformation describe-stacks --stack-name $adGroupC
 
 * GMSA-CredSpec-Document
 ```powershell
-$credspecSSMStack = aws cloudformation create-stack --stack-name credspecGeneratorSSM --template-body file://ssm-document-credspec-generator.yaml --parameters ParameterKey=DirectoryNameParameter,ParameterValue="$directoryNameParam" ParameterKey=ADUserNameParameter,ParameterValue="$adUserParam" ParameterKey=ADUserPasswordParameter,ParameterValue="$adUserPasswordParam" ParameterKey=gMSAAccountName,ParameterValue="$gMSAAccountName" ParameterKey=CredSpecAdditionalAccounts,ParameterValue="" ParameterKey=gMSAADSecurityGroup,ParameterValue="$gMSAADSecurityGroup" --output text
+$credspecSSMStack = aws cloudformation create-stack --stack-name credspecGeneratorSSM --template-body file://ssm-document-credspec-generator.yaml --parameters "ParameterKey=DirectoryNameParameter,ParameterValue=$directoryNameParam" "ParameterKey=ADUserNameParameter,ParameterValue=$adUserParam" "ParameterKey=ADUserPasswordParameter,ParameterValue=$adUserPasswordParam" "ParameterKey=gMSAAccountName,ParameterValue=$gMSAAccountName" "ParameterKey=CredSpecAdditionalAccounts,ParameterValue=" "ParameterKey=gMSAADSecurityGroup,ParameterValue=$gMSAADSecurityGroup" --output text
  
 aws cloudformation describe-stack-events --stack-name $credspecSSMStack
  
