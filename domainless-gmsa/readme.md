@@ -22,6 +22,25 @@ This article covers the required steps to configure this functionality for Windo
 - You have properly installed and configured AWS Command Line Interface (AWS CLI) and kubectl on Amazon EC2 Linux.
 - You have an Active Directory Domain Service (AD DS) that’s accessible from the Amazon EKS cluster. This can either be a self-managed AD or AWS Managed Microsoft AD.
 - Your Windows nodes running in the Amazon EKS cluster can resolve the AD domain FQDN.
+- **IMPORTANT**: Windows IPAM must be enabled in your VPC CNI for Windows pods to get IP addresses.
+
+#### Enable Windows IPAM (Required for Windows Pods):
+
+If Windows pods fail with VPC networking errors, enable Windows IPAM support:
+
+```bash
+# Check if Windows IPAM is enabled
+kubectl get daemonset aws-node -n kube-system -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="ENABLE_WINDOWS_IPAM")].value}'
+
+# If empty, enable Windows IPAM
+kubectl patch daemonset aws-node -n kube-system -p '{"spec":{"template":{"spec":{"containers":[{"name":"aws-node","env":[{"name":"ENABLE_WINDOWS_IPAM","value":"true"}]}]}}}}'
+
+# Restart VPC CNI to apply changes
+kubectl rollout restart daemonset/aws-node -n kube-system
+
+# Wait for rollout to complete
+kubectl rollout status daemonset/aws-node -n kube-system
+```
 
 Overview of the tasks we’ll cover in this article:
 - Create an AD gMSA account, portable identity, and group.
@@ -320,6 +339,46 @@ kubectl get pods -o wide
 # Verify Windows nodes are available
 kubectl get nodes -l kubernetes.io/os=windows
 ```
+
+#### Troubleshooting Failed Pod Deployments:
+
+If your Windows pod shows `0/1 Ready` or fails to start, check the following:
+
+**Common Issues:**
+
+1. **VPC CNI Networking Errors** (pod lacks `vpc.amazonaws.com/PrivateIPv4Address` label):
+   ```bash
+   # Check if Windows IPAM is enabled
+   kubectl get daemonset aws-node -n kube-system -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="ENABLE_WINDOWS_IPAM")].value}'
+   
+   # If empty, enable Windows IPAM
+   kubectl patch daemonset aws-node -n kube-system -p '{"spec":{"template":{"spec":{"containers":[{"name":"aws-node","env":[{"name":"ENABLE_WINDOWS_IPAM","value":"true"}]}]}}}}'
+   
+   # Restart VPC CNI and redeploy pod
+   kubectl rollout restart daemonset/aws-node -n kube-system
+   kubectl delete deployment amazon-eks-gmsa-domainless
+   kubectl apply -f windows-auth-pod.yaml
+   ```
+
+2. **Image Pull Issues** (Windows images are large ~5GB):
+   - Wait 10-15 minutes for first-time image pull
+   - Check events: `kubectl describe pod <pod-name>`
+
+3. **No Windows Nodes Available**:
+   ```bash
+   # Verify Windows nodes exist and are ready
+   kubectl get nodes -l kubernetes.io/os=windows
+   ```
+
+4. **gMSA Configuration Issues**:
+   ```bash
+   # Verify GMSACredentialSpec exists
+   kubectl get gmsacredentialspecs
+   
+   # Check RBAC permissions
+   kubectl get clusterrole eksgmsa-role-domainless
+   kubectl get rolebinding gmsa-assign-role-domainless -n default
+   ```
 
 ### 6. Test the Windows Authentication from inside the Windows pod
 6.1 Run the following command to open a PowerShell session within our test pod from step 5.2 above:
