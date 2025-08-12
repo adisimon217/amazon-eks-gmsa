@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    run: amazon-eks-gmsa-domainless
+  name: amazon-eks-gmsa-domainless
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      run: amazon-eks-gmsa-domainless
+  template:
+    metadata:
+      labels:
+        run: amazon-eks-gmsa-domainless
+    spec:
+      securityContext:
+        windowsOptions:
+          gmsaCredentialSpecName: gmsaeks-domainless
+      containers:
+      - image: mcr.microsoft.com/windows/servercore:ltsc2019
+        imagePullPolicy: Always
+        name: gmsadomainless
+        command:
+          - "powershell.exe"
+          - "-Command"
+          - "while (1) { sleep 1 }"
+      nodeSelector:
+        kubernetes.io/os: windows

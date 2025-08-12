@@ -38,15 +38,15 @@ Overview of the tasks we’ll cover in this article:
 ### 1. Create and configure gMSA account on Active Directory Domain
 If you have not already created a gMSA Service Account in your domain, you’ll need to first generate a Key Distribution Service (KDS) root key. The KDS is responsible for creating, rotating, and releasing the gMSA password to authorized hosts. When the ccg.exe needs to retrieve gMSA credentials, it contact KDS to retrieve the current password. 
 
-**If you are using AWS Managed AD, then you can skip directly to step 2.3.** gMSA permissions are pre-configured with your AWS managed Microsoft AD. As a result, you are not required to generate KDS root key to generate the gMSA passwords.
+**If you are using AWS Managed AD, then you can skip directly to step 1.2.** gMSA permissions are pre-configured with your AWS managed Microsoft AD. As a result, you are not required to generate KDS root key to generate the gMSA passwords.
 
-1.1 To check if the KDS root key has already been created, run the following PowerShell cmdlet with domain admin privileges on a domain controller using the AD PowerShell module:
+#### 1.1 To check if the KDS root key has already been created, run the following PowerShell cmdlet with domain admin privileges on a domain controller using the AD PowerShell module:
 
 ```powershell
 Get-KdsRootKey
 ```
 
-1.2 If the command returns a key ID, you’re all set. Otherwise, create the KDS root key by running the following command:
+If the command returns a key ID, you’re all set. Otherwise, create the KDS root key by running the following command:
 
 ```powershell
 Add-KdsRootKey -EffectiveImmediately
@@ -54,7 +54,7 @@ Add-KdsRootKey -EffectiveImmediately
 
 Although the command implies the key is effective immediately, you need to wait 10 hours before the KDS root key is replicated and available for use on all domain controllers. If you’re interesting in better understanding gMSA Accounts, then refer to the Microsoft official documentation.
 
-1.3 To create the gMSA account and allow the ccg.exe to retrieve the gMSA password, run the following PowerShell commands from a Windows Server or Client with access to the AD domain.
+#### 1.2 To create the gMSA account and allow the ccg.exe to retrieve the gMSA password, run the following PowerShell commands from a Windows Server or Client with access to the AD domain.
 
 ```powershell
 # Install the RSAT AD Feature
@@ -66,11 +66,16 @@ New-ADGroup -Name "Amazon EKS Authorized Portable Identity" -SamAccountName "EKS
 # Create the gMSA - Replace Name value with yours preference
 New-ADServiceAccount -Name "gmsaeks" -DnsHostName "gmsaeks.YOURDOMAIN_FQDN" -ServicePrincipalNames "host/gmsaeks", "host/gmsaeks.YOURDOMAIN_FQDN" -PrincipalsAllowedToRetrieveManagedPassword "EKSPortableIdentity"
 
+New-ADServiceAccount -Name "gmsaeks" -DnsHostName "gmsaeks.sandbox.simadi.com" -ServicePrincipalNames "sandbox/gmsaeks", "sandbox/gmsaeks.sandbox.simadi.com" -PrincipalsAllowedToRetrieveManagedPassword "EKSPortableIdentity"
+
+
 # Create the portable identity user account - Replace Name value with yours preference
-New-ADUser -Name "eks-portable-identity" -AccountPassword (ConvertTo-SecureString -AsPlainText "YOUR_PASSWORD" -Force) -Enabled 1 
+New-ADUser -Name "eksportaid" -AccountPassword (ConvertTo-SecureString -AsPlainText "YOUR_PASSWORD" -Force) -Enabled 1 
+
+New-ADUser -Name "eksportaid" -AccountPassword (ConvertTo-SecureString -AsPlainText "ContainerRunner54#78" -Force) -Enabled 1 
 
 # Add your Windows Worker Node the AD group
-Add-ADGroupMember -Identity "EKSPortableIdentity" -Members "eks-portable-identity"
+Add-ADGroupMember -Identity "EKSPortableIdentity" -Members "eksportaid"
 ```
 
 Note: Replace YOURDOMAIN_FQDN with your fully qualified domain name. Replace YOUR_PASSWORD with a unique password and store in a secret store to be retrieved by the CCG plugin.
@@ -95,6 +100,22 @@ sed -i.back "s/signerName: kubernetes.io\/kubelet-serving/signerName: beta.eks.a
 
 Note: Always check for the latest gMSA admission-webhook version on the [kubernetes-sigs/windows-gmsa](https://github.com/kubernetes-sigs/windows-gmsa/tree/master/admission-webhook).
 
+2.2. Validate that the Webhook is working
+
+```bash
+# Check if webhook pods are running
+kubectl get pods -n gmsa-webhook
+
+# Verify webhook configurations exist
+kubectl get validatingwebhookconfiguration gmsa-webhook
+kubectl get mutatingwebhookconfiguration gmsa-webhook
+
+# Check if the CRD was created
+kubectl get crd gmsacredentialspecs.windows.k8s.io
+
+# View webhook service
+kubectl get svc -n gmsa-webhook
+```
 
 ### 3. Create gMSA CredentialSpec resources and use AWS Secret Manager as a credential store.
 With the gMSA resources successfully deployed in the Amazon EKS cluster, along with the CredentialSpec CRD and gMSA webhooks to populate and validate the resource across the cluster, we‘ll now generate and deploy the gMSA CredentialSpec resource into the Amazon EKS cluster.
@@ -107,8 +128,7 @@ The gMSA CredentialSpec contains metadata that the `ccg.exe` process on the host
 aws secretsmanager create-secret \
 --name gmsa-plugin-input \
 --description "Amazon EKS - gMSA Portable Identity." \
---secret-string "{\"username\":\"eks-portable-identity\",\"password\":\"YOURPASSWORD\",\"domainName\":\"YOURDOMAIN_FQDN\"}"
-Note: Replace user with your portable identity credential. Replace YOUR_PASSWORD the portable identity password with the one you create in step 1.3. Replace YOURDOMAIN_FQDN with your fully qualified domain name.
+--secret-string "{\"username\":\"eksportaid\",\"password\":\"YOURPASSWORD\",\"domainName\":\"YOURDOMAIN_FQDN\"}"
 ```
 
 Note: Replace user with your portable identity credential. Replace YOUR_PASSWORD the portable identity password with the one you create in step 1.3. Replace YOURDOMAIN_FQDN with your fully qualified domain name.
@@ -130,7 +150,7 @@ Note: Replace user with your portable identity credential. Replace YOUR_PASSWORD
 
 Note: Replace SECRET-ARN with your secret ARN created on the AWS Secret Manager.
 
-3.3 Now, let’s create the gMSA CredentialSpec file and apply it to the Amazon EKS cluster. Create a file containing the code below and save it as domainless-credspec-secretmanager.yaml.
+3.3 Now, let’s create the gMSA CredentialSpec file and apply it to the Amazon EKS cluster. Create a file containing the code below and save it as `domainless-credspec-secretmanager.yaml`.
 
 ```yaml
 apiVersion: windows.k8s.io/v1
@@ -158,42 +178,27 @@ credspec:
       PluginGUID: "{859E1386-BDB4-49E8-85C7-3070B13920E1}"
       PluginInput: "{\"credentialArn\":\"ARN-SECRET\"}"
 ```
+Tip:
+- Run Get-ADServiceAccount -Identity gmsaeks to find the gMSA-ACCOUNT-SID from the SID and gMSA-ACCOUNT-GUID from ObjectGUID s
 
-Note: Replace values to match your environment. You can run the following PowerShell command in a Windows terminal with access to your Active Directory domain in order to retrieve SID and GUID from the gMSA account: Get-ADServiceAccount -Identity gMSA-ACCOUNT-NAME
-
-Your file should look like the following:
-
-```yaml
-apiVersion: windows.k8s.io/v1
-kind: GMSACredentialSpec
-metadata:
-  name: gmsaeks-domainless
-credspec:
-  CmsPlugins:
-  - ActiveDirectory
-  DomainJoinConfig:
-    Sid: S-1-5-21-857038504-468933455-1338018723
-    MachineAccountName: gmsaeks
-    Guid: 59d60a02-be02-4fd3-8a7f-c7c6c0daceaa
-    DnsTreeName: marciomorales.local
-    DnsName: marciomorales.local
-    NetBiosName: marciomorales
-  ActiveDirectoryConfig:
-    GroupManagedServiceAccounts:
-    - Name: gmsaeks
-      Scope: marciomorales.local
-    - Name: gmsaeks
-      Scope: marciomorales
-    HostAccountConfig:
-      PortableCcgVersion: "1"
-      PluginGUID: "{859E1386-BDB4-49E8-85C7-3070B13920E1}"
-      PluginInput: "{\"credentialArn\":\"arn:aws:secretsmanager:us-east-1:0123456789:secret:gmsa-plugin-input-tBOL0j\"}"
-```
 
 3.4 Create the gMSA CredentialSpec resource on the cluster with the following command:
 
 ```bash
 kubectl create -f domainless-credspec-secretmanager.yaml
+```
+
+3.5 Validate the GMSACredentialSpec was created successfully:
+
+```bash
+# List all GMSACredentialSpec resources
+kubectl get gmsacredentialspecs
+
+# Get detailed information about your specific credential spec
+kubectl get gmsacredentialspec gmsaeks-domainless -o yaml
+
+# Short form to see just the basic info
+kubectl describe gmsacredentialspec gmsaeks-domainless
 ```
 
 ### 4. Create a Kubernetes ClusterRole and RoleBinding
@@ -229,12 +234,25 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
 ```
 
-Note: Replace resourceNames with the one generated in step 4.3 if it’s different from what we specified.
+Note: Replace resourceNames with the one generated in step 3.3 (metadata-name) if it’s different from what we specified.
 
 4.2 Create the ClusterRole and RoleBinding on the cluster with the following command:
 
 ```bash
 kubectl apply -f gmsa-domainless-clusterrole.yaml
+```
+
+4.3 Validate the ClusterRole and RoleBinding were created successfully:
+
+```bash
+# Check if the ClusterRole was created
+kubectl get clusterrole eksgmsa-role-domainless
+
+# Check if the RoleBinding was created
+kubectl get rolebinding gmsa-assign-role-domainless -n default
+
+# View the ClusterRole details
+kubectl describe clusterrole eksgmsa-role-domainless
 ```
 
 ### 5. Configure the gMSA CredentialSpec in the Windows pod spec
@@ -276,7 +294,7 @@ spec:
         kubernetes.io/os: windows
 ```
 
-Note: Replace gmsaCredentialSpecName value with the name of the gMSA CredentialSpec you created in step 4.2. For this post, we used gmsaeks-domainless.
+Note: Replace gmsaCredentialSpecName value with the name of the gMSA CredentialSpec you created in step 3.3 (metadata-name) if it’s different from what we specified. Here we use `gmsaeks-domainless`
 
 5.2 Deploy the Windows pod using following command:
 
@@ -284,8 +302,27 @@ Note: Replace gmsaCredentialSpecName value with the name of the gMSA CredentialS
 kubectl apply -f windows-auth-pod.yaml
 ```
 
+5.3 Validate the deployment and pod status:
+
+```bash
+# Check if deployment was created
+kubectl get deployments
+
+# Check pod status
+kubectl get pods
+
+# Check pod details and events
+kubectl describe pod <pod-name>
+
+# Check if pod is scheduled to Windows nodes
+kubectl get pods -o wide
+
+# Verify Windows nodes are available
+kubectl get nodes -l kubernetes.io/os=windows
+```
+
 ### 6. Test the Windows Authentication from inside the Windows pod
-6.1 Run the following command to open a PowerShell session within our test pod from step 7.2:
+6.1 Run the following command to open a PowerShell session within our test pod from step 5.2 above:
 
 ```bash
 kubectl exec -it PODNAME -- powershell.exe
