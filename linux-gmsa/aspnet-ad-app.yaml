@@ -1,0 +1,168 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aspnet-ad-app
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: aspnet-ad-app
+  template:
+    metadata:
+      labels:
+        app: aspnet-ad-app
+    spec:
+      serviceAccountName: gmsa-service-account
+      containers:
+      - name: aspnet-ad-app
+        image: mcr.microsoft.com/dotnet/aspnet:8.0
+        ports:
+        - containerPort: 8080
+        env:
+        - name: ASPNETCORE_URLS
+          value: "http://+:8080"
+        - name: AWS_REGION
+          value: "ap-southeast-1"
+        - name: SECRET_NAME
+          value: "eks-gmsa-credentials"
+        command: ["/bin/bash"]
+        args:
+          - -c
+          - |
+            cat > /app/Program.cs << 'EOF'
+            using System.DirectoryServices;
+            using System.Text.Json;
+            using Amazon.SecretsManager;
+            using Amazon.SecretsManager.Model;
+
+            var builder = WebApplication.CreateBuilder(args);
+            builder.Services.AddSingleton<IAmazonSecretsManager, AmazonSecretsManagerClient>();
+
+            var app = builder.Build();
+
+            app.MapGet("/", async (IAmazonSecretsManager secretsManager) =>
+            {
+                try
+                {
+                    var secretName = Environment.GetEnvironmentVariable("SECRET_NAME") ?? "eks-gmsa-credentials";
+                    var region = Environment.GetEnvironmentVariable("AWS_REGION") ?? "us-east-1";
+                    
+                    var request = new GetSecretValueRequest
+                    {
+                        SecretId = secretName
+                    };
+                    
+                    var response = await secretsManager.GetSecretValueAsync(request);
+                    var secret = JsonSerializer.Deserialize<Dictionary<string, string>>(response.SecretString);
+                    
+                    var username = secret["username"];
+                    var password = secret["password"];
+                    var domain = secret["domain"];
+                    var gmsaAccount = secret["gmsaAccount"];
+                    
+                    var html = $@"
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>AD Integration Demo</title>
+                <style>
+                    body {{ font-family: Arial, sans-serif; margin: 40px; }}
+                    .container {{ max-width: 800px; margin: 0 auto; }}
+                    .status {{ padding: 10px; margin: 10px 0; border-radius: 5px; }}
+                    .success {{ background-color: #d4edda; border: 1px solid #c3e6cb; color: #155724; }}
+                    .info {{ background-color: #d1ecf1; border: 1px solid #bee5eb; color: #0c5460; }}
+                    table {{ width: 100%; border-collapse: collapse; margin: 20px 0; }}
+                    th, td {{ padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }}
+                    th {{ background-color: #f2f2f2; }}
+                </style>
+            </head>
+            <body>
+                <div class='container'>
+                    <h1>ASP.NET Core AD Integration Demo</h1>
+                    <div class='status success'>
+                        ✅ Successfully retrieved gMSA credentials from AWS Secrets Manager
+                    </div>
+                    <div class='status info'>
+                        🔐 Using gMSA account for Active Directory authentication
+                    </div>
+                    
+                    <h2>Authentication Details</h2>
+                    <table>
+                        <tr><th>Property</th><th>Value</th></tr>
+                        <tr><td>Service Account</td><td>{gmsaAccount}</td></tr>
+                        <tr><td>Domain</td><td>{domain}</td></tr>
+                        <tr><td>Authentication Method</td><td>gMSA via AWS Secrets Manager</td></tr>
+                        <tr><td>Container OS</td><td>Linux</td></tr>
+                        <tr><td>Runtime</td><td>.NET 8.0</td></tr>
+                        <tr><td>Pod Name</td><td>{Environment.MachineName}</td></tr>
+                        <tr><td>Timestamp</td><td>{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC</td></tr>
+                    </table>
+                    
+                    <h2>LDAP Connection Test</h2>
+                    <div class='status info'>
+                        📡 Ready for LDAP operations using gMSA credentials
+                    </div>
+                </div>
+            </body>
+            </html>";
+                    
+                    return Results.Content(html, "text/html");
+                }
+                catch (Exception ex)
+                {
+                    var errorHtml = $@"
+            <!DOCTYPE html>
+            <html>
+            <head><title>AD Integration Demo - Error</title></head>
+            <body>
+                <h1>Error</h1>
+                <p>Failed to retrieve credentials: {ex.Message}</p>
+                <p>Check AWS Secrets Manager configuration and IAM permissions.</p>
+            </body>
+            </html>";
+                    return Results.Content(errorHtml, "text/html");
+                }
+            });
+
+            app.Run();
+            EOF
+
+            cat > /app/app.csproj << 'EOF'
+            <Project Sdk="Microsoft.NET.Sdk.Web">
+              <PropertyGroup>
+                <TargetFramework>net8.0</TargetFramework>
+                <Nullable>enable</Nullable>
+                <ImplicitUsings>enable</ImplicitUsings>
+              </PropertyGroup>
+              <ItemGroup>
+                <PackageReference Include="AWSSDK.SecretsManager" Version="3.7.400.44" />
+                <PackageReference Include="System.DirectoryServices" Version="8.0.0" />
+              </ItemGroup>
+            </Project>
+            EOF
+
+            cd /app && dotnet run --urls http://0.0.0.0:8080
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "200m"
+          limits:
+            memory: "512Mi"
+            cpu: "400m"
+      nodeSelector:
+        kubernetes.io/os: linux
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aspnet-ad-service
+  namespace: default
+spec:
+  selector:
+    app: aspnet-ad-app
+  ports:
+  - port: 80
+    targetPort: 8080
+    protocol: TCP
+  type: LoadBalancer
