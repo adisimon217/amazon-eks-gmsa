@@ -5,56 +5,178 @@ This guide demonstrates how to deploy AD-aware ASP.NET Core applications on Linu
 ## Prerequisites
 
 - Completed the basic EKS setup from [readme.md](./readme.md)
-- Active Directory Domain Service accessible from EKS cluster
-- gMSA account created in Active Directory
+- AWS Managed Microsoft AD accessible from EKS cluster. Follow [managed-ad-setup.md](./managed-ad-setup.md) if you need to create a new Active Directory Domain.
+- gMSA permissions are pre-configured with your AWS Managed Microsoft AD (KDS root key generation not required)
+- A domain-joined Windows instance to run Active Directory management commands
 - AWS Secrets Manager access configured
+
+## Configuration Variables
+
+Set these variables before running the setup commands:
+
+```bash
+# Required - Replace with your values
+export AD_DOMAIN_NAME="sandbox.aws.corp.com"  # Your AD domain name
+export AD_NETBIOS_NAME="sandbox"              # Your AD NetBIOS name
+export GMSA_SERVICE_ACCOUNT="eks-gmsa-svc"    # gMSA service account name
+export GMSA_USER_ACCOUNT="eks-svc-user"       # Service user account name
+export GMSA_USER_PASSWORD="YourSecurePassword123!"  # Service user password
+export REGION="ap-southeast-1"                # AWS region
+
+# Optional - Modify if needed
+export GMSA_GROUP_NAME="EKS-gMSA-Users"        # AD group for gMSA access
+export GMSA_GROUP_SAM="EKSgMSAUsers"           # AD group SAM account name
+export SECRET_NAME="eks-gmsa-credentials"      # AWS Secrets Manager secret name
+```
+
+## Understanding gMSA for Linux Containers
+
+For **Linux containers**, gMSA integration works differently than Windows containers:
+
+- **Linux containers cannot domain-join** - They can't natively retrieve gMSA passwords from Active Directory
+- **A regular user account acts as a "proxy"** - It has permission to retrieve the gMSA password on behalf of the Linux application
+- **The gMSA account is still password-free** - Active Directory automatically manages its password rotation
+
+**Authentication Flow:**
+```
+Linux Container → AWS Secrets Manager → Regular User Credentials → AD → gMSA Password → Application Uses gMSA Identity
+```
+
+**What each account does:**
+- `eks-gmsa-svc` (gMSA): The actual service identity your application uses for AD operations (password-free, auto-rotated)
+- `eks-svc-user` (regular user): A "retrieval account" that can fetch the gMSA password from Active Directory
+- AD Group: Controls which accounts can retrieve the gMSA password
 
 ## Step 1: Create gMSA Account in Active Directory
 
-### 1.1 Create KDS Root Key (if not exists)
-```powershell
-# Check if KDS root key exists
-Get-KdsRootKey
+> **Note:** The following PowerShell commands must be run on a domain-joined Windows instance with Active Directory PowerShell module installed.
 
-# If no key exists, create one
-Add-KdsRootKey -EffectiveImmediately
-```
+> **Optional:** If you need to provision a directory management EC2 instance, you can use the AWS SSM document:
+> ```bash
+> # Get your Directory ID (replace with your actual directory ID)
+> DIRECTORY_ID=$(aws ds describe-directories --query 'DirectoryDescriptions[0].DirectoryId' --output text --region $REGION)
+> 
+> # Create directory management instance
+> aws ssm start-automation-execution \
+>     --document-name "AWS-CreateDSManagementInstance" \
+>     --document-version "\$DEFAULT" \
+>     --parameters '{
+>         "DirectoryId":["'$DIRECTORY_ID'"],
+>         "KeyPairName":["NoKeyPair"],
+>         "IamInstanceProfileName":["AmazonSSMDirectoryServiceInstanceProfileRole"],
+>         "SecurityGroupName":["AmazonSSMDirectoryServiceSecurityGroup"],
+>         "AmiId":["{{ssm:/aws/service/ami-windows-latest/Windows_Server-2019-English-Full-Base}}"],
+>         "InstanceType":["t3.medium"],
+>         "MetadataOptions":["{\"HttpEndpoint\":\"enabled\",\"HttpTokens\":\"optional\"}"]}
+>     }' \
+>     --region $REGION
+> ```
 
-### 1.2 Create gMSA and Service Account
+### 1.1 Create gMSA and Service Account
 ```powershell
+# Set PowerShell variables (replace with your values)
+$AD_DOMAIN_NAME = "sandbox.aws.corp.com"
+$AD_NETBIOS_NAME = "sandbox"
+$GMSA_SERVICE_ACCOUNT = "eks-gmsa-svc"
+$GMSA_USER_ACCOUNT = "eks-svc-user"
+$GMSA_USER_PASSWORD = "YourSecurePassword123!"
+$GMSA_GROUP_NAME = "EKS-gMSA-Users"
+$GMSA_GROUP_SAM = "EKSgMSAUsers"
+
 # Create AD group for gMSA access
-New-ADGroup -Name "EKS-gMSA-Users" -SamAccountName "EKSgMSAUsers" -GroupScope DomainLocal
+New-ADGroup -Name $GMSA_GROUP_NAME -SamAccountName $GMSA_GROUP_SAM -GroupScope DomainLocal
 
 # Create gMSA account
-New-ADServiceAccount -Name "eks-gmsa-svc" -DnsHostName "eks-gmsa-svc.yourdomain.com" -ServicePrincipalNames "host/eks-gmsa-svc", "host/eks-gmsa-svc.yourdomain.com" -PrincipalsAllowedToRetrieveManagedPassword "EKSgMSAUsers"
+New-ADServiceAccount -Name $GMSA_SERVICE_ACCOUNT -DnsHostName "$GMSA_SERVICE_ACCOUNT.$AD_DOMAIN_NAME" -ServicePrincipalNames "$AD_NETBIOS_NAME/$GMSA_SERVICE_ACCOUNT", "$AD_NETBIOS_NAME/$GMSA_SERVICE_ACCOUNT.$AD_DOMAIN_NAME" -PrincipalsAllowedToRetrieveManagedPassword $GMSA_GROUP_SAM
 
 # Create service user for gMSA retrieval
-New-ADUser -Name "eks-svc-user" -AccountPassword (ConvertTo-SecureString -AsPlainText "YourSecurePassword123!" -Force) -Enabled $true
+New-ADUser -Name $GMSA_USER_ACCOUNT -AccountPassword (ConvertTo-SecureString -AsPlainText $GMSA_USER_PASSWORD -Force) -Enabled $true
 
 # Add service user to gMSA group
-Add-ADGroupMember -Identity "EKSgMSAUsers" -Members "eks-svc-user"
+Add-ADGroupMember -Identity $GMSA_GROUP_SAM -Members $GMSA_USER_ACCOUNT
 ```
 
+### 1.2 Validate the Setup
+```powershell
+# Verify gMSA account was created
+Get-ADServiceAccount -Identity $GMSA_SERVICE_ACCOUNT
+
+# Verify regular user account was created
+Get-ADUser -Identity $GMSA_USER_ACCOUNT
+
+# Verify AD group was created and contains the user
+Get-ADGroupMember -Identity $GMSA_GROUP_SAM
+
+# Verify gMSA permissions (shows which principals can retrieve the password)
+Get-ADServiceAccount -Identity $GMSA_SERVICE_ACCOUNT -Properties PrincipalsAllowedToRetrieveManagedPassword
+```
+
+**Expected Output:**
+```
+DistinguishedName                          : CN=eks-gmsa-svc,CN=Managed Service
+                                             Accounts,DC=sandbox,DC=aws,DC=corp,DC=com
+Enabled                                    : True
+Name                                       : eks-gmsa-svc
+ObjectClass                                : msDS-GroupManagedServiceAccount
+ObjectGUID                                 : b0c28776-61a3-4488-8d72-fd28c89c5fe3
+PrincipalsAllowedToRetrieveManagedPassword : {CN=EKS-gMSA-Users,OU=Users,OU=sandbox,DC=sandbox,DC=aws,DC=corp,DC=com}
+SamAccountName                             : eks-gmsa-svc$
+SID                                        : S-1-5-21-1485181390-1510379540-1491249750-1148
+UserPrincipalName                          :
+```
+
+**Key validation points:**
+- ✅ `Enabled: True` - gMSA account is active
+- ✅ `ObjectClass: msDS-GroupManagedServiceAccount` - Confirms it's a gMSA
+- ✅ `PrincipalsAllowedToRetrieveManagedPassword` contains your AD group
+- ✅ `SamAccountName` ends with `$` (indicates service account)
+
+> **Side Note:** If you are not using AWS Managed Microsoft AD, you will need to create a KDS root key before creating gMSA accounts:
+> ```powershell
+> # Check if KDS root key exists
+> Get-KdsRootKey
+> 
+> # If no key exists, create one
+> Add-KdsRootKey -EffectiveImmediately
+> ```
+
 ## Step 2: Store gMSA Credentials in AWS Secrets Manager
+
+> **Note:** The following commands should be run on your Linux instance (not the Windows domain management instance). Switch back to your Linux environment where you have AWS CLI configured.
+
+**Set the environment variables on your Linux instance:**
+```bash
+# Set the same variables from the Configuration Variables section
+export AD_DOMAIN_NAME="sandbox.aws.corp.com"
+export AD_NETBIOS_NAME="sandbox"
+export GMSA_SERVICE_ACCOUNT="eks-gmsa-svc"
+export GMSA_USER_ACCOUNT="eks-svc-user"
+export GMSA_USER_PASSWORD="YourSecurePassword123!"
+export REGION="ap-southeast-1"
+export GMSA_GROUP_NAME="EKS-gMSA-Users"
+export GMSA_GROUP_SAM="EKSgMSAUsers"
+export SECRET_NAME="eks-gmsa-credentials"
+export CLUSTER_NAME="linux-aspnet-demo"  # EKS cluster name
+```
 
 ### 2.1 Create the secret
 ```bash
 # Create secret with gMSA credentials
 aws secretsmanager create-secret \
-    --name "eks-gmsa-credentials" \
+    --name "$SECRET_NAME" \
     --description "gMSA credentials for EKS Linux containers" \
     --secret-string '{
-        "username": "eks-svc-user@yourdomain.com",
-        "password": "YourSecurePassword123!",
-        "domain": "yourdomain.com",
-        "gmsaAccount": "eks-gmsa-svc$"
+        "username": "'$GMSA_USER_ACCOUNT'@'$AD_DOMAIN_NAME'",
+        "password": "'$GMSA_USER_PASSWORD'",
+        "domain": "'$AD_DOMAIN_NAME'",
+        "gmsaAccount": "'$GMSA_SERVICE_ACCOUNT'$"
     }' \
     --region $REGION
 ```
 
 ### 2.2 Create IAM policy for secret access
 ```bash
-cat > gmsa-secret-policy.json << EOF
+cat > /tmp/gmsa-secret-policy.json << EOF
 {
     "Version": "2012-10-17",
     "Statement": [
@@ -63,7 +185,7 @@ cat > gmsa-secret-policy.json << EOF
             "Action": [
                 "secretsmanager:GetSecretValue"
             ],
-            "Resource": "arn:aws:secretsmanager:$REGION:*:secret:eks-gmsa-credentials*"
+            "Resource": "arn:aws:secretsmanager:$REGION:*:secret:$SECRET_NAME*"
         }
     ]
 }
@@ -72,7 +194,10 @@ EOF
 # Create IAM policy
 aws iam create-policy \
     --policy-name EKS-gMSA-SecretsManager-Policy \
-    --policy-document file://gmsa-secret-policy.json
+    --policy-document file:///tmp/gmsa-secret-policy.json
+
+# Clean up temporary file
+rm /tmp/gmsa-secret-policy.json
 ```
 
 ## Step 3: Create Service Account with IAM Role
@@ -83,7 +208,7 @@ aws iam create-policy \
 OIDC_ISSUER=$(aws eks describe-cluster --name $CLUSTER_NAME --region $REGION --query "cluster.identity.oidc.issuer" --output text)
 
 # Create trust policy
-cat > trust-policy.json << EOF
+cat > /tmp/trust-policy.json << EOF
 {
     "Version": "2012-10-17",
     "Statement": [
@@ -107,12 +232,15 @@ EOF
 # Create IAM role
 aws iam create-role \
     --role-name EKS-gMSA-Role \
-    --assume-role-policy-document file://trust-policy.json
+    --assume-role-policy-document file:///tmp/trust-policy.json
 
 # Attach policy to role
 aws iam attach-role-policy \
     --role-name EKS-gMSA-Role \
     --policy-arn arn:aws:iam::$(aws sts get-caller-identity --query Account --output text):policy/EKS-gMSA-SecretsManager-Policy
+
+# Clean up temporary file
+rm /tmp/trust-policy.json
 ```
 
 ### 3.2 Create Kubernetes service account
@@ -123,186 +251,76 @@ kubectl annotate serviceaccount gmsa-service-account \
     eks.amazonaws.com/role-arn=arn:aws:iam::$(aws sts get-caller-identity --query Account --output text):role/EKS-gMSA-Role
 ```
 
-## Step 4: Create AD-Aware ASP.NET Application
+### 3.3 Validate the setup
+```bash
+# Verify service account was created
+kubectl get serviceaccount gmsa-service-account
 
-### 4.1 Create application deployment
-Create file `aspnet-ad-app.yaml`:
+# Verify IAM role annotation
+kubectl describe serviceaccount gmsa-service-account
 
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: aspnet-ad-app
-  namespace: default
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: aspnet-ad-app
-  template:
-    metadata:
-      labels:
-        app: aspnet-ad-app
-    spec:
-      serviceAccountName: gmsa-service-account
-      containers:
-      - name: aspnet-ad-app
-        image: mcr.microsoft.com/dotnet/aspnet:8.0
-        ports:
-        - containerPort: 8080
-        env:
-        - name: ASPNETCORE_URLS
-          value: "http://+:8080"
-        - name: AWS_REGION
-          value: "ap-southeast-1"
-        - name: SECRET_NAME
-          value: "eks-gmsa-credentials"
-        command: ["/bin/bash"]
-        args:
-          - -c
-          - |
-            cat > /app/Program.cs << 'EOF'
-            using System.DirectoryServices;
-            using System.Text.Json;
-            using Amazon.SecretsManager;
-            using Amazon.SecretsManager.Model;
-
-            var builder = WebApplication.CreateBuilder(args);
-            builder.Services.AddSingleton<IAmazonSecretsManager, AmazonSecretsManagerClient>();
-
-            var app = builder.Build();
-
-            app.MapGet("/", async (IAmazonSecretsManager secretsManager) =>
-            {
-                try
-                {
-                    var secretName = Environment.GetEnvironmentVariable("SECRET_NAME") ?? "eks-gmsa-credentials";
-                    var region = Environment.GetEnvironmentVariable("AWS_REGION") ?? "us-east-1";
-                    
-                    var request = new GetSecretValueRequest
-                    {
-                        SecretId = secretName
-                    };
-                    
-                    var response = await secretsManager.GetSecretValueAsync(request);
-                    var secret = JsonSerializer.Deserialize<Dictionary<string, string>>(response.SecretString);
-                    
-                    var username = secret["username"];
-                    var password = secret["password"];
-                    var domain = secret["domain"];
-                    var gmsaAccount = secret["gmsaAccount"];
-                    
-                    var html = $@"
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <title>AD Integration Demo</title>
-                <style>
-                    body {{ font-family: Arial, sans-serif; margin: 40px; }}
-                    .container {{ max-width: 800px; margin: 0 auto; }}
-                    .status {{ padding: 10px; margin: 10px 0; border-radius: 5px; }}
-                    .success {{ background-color: #d4edda; border: 1px solid #c3e6cb; color: #155724; }}
-                    .info {{ background-color: #d1ecf1; border: 1px solid #bee5eb; color: #0c5460; }}
-                    table {{ width: 100%; border-collapse: collapse; margin: 20px 0; }}
-                    th, td {{ padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }}
-                    th {{ background-color: #f2f2f2; }}
-                </style>
-            </head>
-            <body>
-                <div class='container'>
-                    <h1>ASP.NET Core AD Integration Demo</h1>
-                    <div class='status success'>
-                        ✅ Successfully retrieved gMSA credentials from AWS Secrets Manager
-                    </div>
-                    <div class='status info'>
-                        🔐 Using gMSA account for Active Directory authentication
-                    </div>
-                    
-                    <h2>Authentication Details</h2>
-                    <table>
-                        <tr><th>Property</th><th>Value</th></tr>
-                        <tr><td>Service Account</td><td>{gmsaAccount}</td></tr>
-                        <tr><td>Domain</td><td>{domain}</td></tr>
-                        <tr><td>Authentication Method</td><td>gMSA via AWS Secrets Manager</td></tr>
-                        <tr><td>Container OS</td><td>Linux</td></tr>
-                        <tr><td>Runtime</td><td>.NET 8.0</td></tr>
-                        <tr><td>Pod Name</td><td>{Environment.MachineName}</td></tr>
-                        <tr><td>Timestamp</td><td>{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC</td></tr>
-                    </table>
-                    
-                    <h2>LDAP Connection Test</h2>
-                    <div class='status info'>
-                        📡 Ready for LDAP operations using gMSA credentials
-                    </div>
-                </div>
-            </body>
-            </html>";
-                    
-                    return Results.Content(html, "text/html");
-                }
-                catch (Exception ex)
-                {
-                    var errorHtml = $@"
-            <!DOCTYPE html>
-            <html>
-            <head><title>AD Integration Demo - Error</title></head>
-            <body>
-                <h1>Error</h1>
-                <p>Failed to retrieve credentials: {ex.Message}</p>
-                <p>Check AWS Secrets Manager configuration and IAM permissions.</p>
-            </body>
-            </html>";
-                    return Results.Content(errorHtml, "text/html");
-                }
-            });
-
-            app.Run();
-            EOF
-
-            cat > /app/app.csproj << 'EOF'
-            <Project Sdk="Microsoft.NET.Sdk.Web">
-              <PropertyGroup>
-                <TargetFramework>net8.0</TargetFramework>
-                <Nullable>enable</Nullable>
-                <ImplicitUsings>enable</ImplicitUsings>
-              </PropertyGroup>
-              <ItemGroup>
-                <PackageReference Include="AWSSDK.SecretsManager" Version="3.7.400.44" />
-                <PackageReference Include="System.DirectoryServices" Version="8.0.0" />
-              </ItemGroup>
-            </Project>
-            EOF
-
-            cd /app && dotnet run --urls http://0.0.0.0:8080
-        resources:
-          requests:
-            memory: "256Mi"
-            cpu: "200m"
-          limits:
-            memory: "512Mi"
-            cpu: "400m"
-      nodeSelector:
-        kubernetes.io/os: linux
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: aspnet-ad-service
-  namespace: default
-spec:
-  selector:
-    app: aspnet-ad-app
-  ports:
-  - port: 80
-    targetPort: 8080
-    protocol: TCP
-  type: LoadBalancer
+# Verify IAM role exists
+aws iam get-role --role-name EKS-gMSA-Role --region $REGION
 ```
 
-### 4.2 Deploy the AD-aware application
+## Step 4: Deploy AD-Aware ASP.NET Application
+
+### 4.1 Understanding the Application Configuration
+
+Before deploying, it's important to understand how the application securely retrieves gMSA credentials:
+
+**Credentials are NOT hardcoded** in the YAML file. Instead, they're retrieved dynamically at runtime through this secure flow:
+
+1. **Environment Variables** (in YAML):
+   ```yaml
+   env:
+   - name: AWS_REGION
+     value: "ap-southeast-1"
+   - name: SECRET_NAME
+     value: "eks-gmsa-credentials"
+   ```
+
+2. **Service Account with IAM Role** (links to Step 3):
+   ```yaml
+   serviceAccountName: gmsa-service-account
+   ```
+
+3. **Runtime Credential Retrieval** (application code):
+   ```csharp
+   // Gets secret name from environment variable
+   var secretName = Environment.GetEnvironmentVariable("SECRET_NAME");
+   
+   // Uses AWS SDK to retrieve secret from Secrets Manager
+   var response = await secretsManager.GetSecretValueAsync(request);
+   
+   // Parses JSON secret containing gMSA credentials
+   var secret = JsonSerializer.Deserialize<Dictionary<string, string>>(response.SecretString);
+   var username = secret["username"];     // eks-svc-user@sandbox.aws.corp.com
+   var gmsaAccount = secret["gmsaAccount"]; // eks-gmsa-svc$
+   ```
+
+**Security Flow:**
+```
+Pod starts → Uses service account → Assumes IAM role → Calls Secrets Manager → Gets gMSA credentials → Uses them for AD operations
+```
+
+**Why this approach is secure:**
+- ✅ No credentials stored in code or YAML files
+- ✅ Only authorized pods can access the secret
+- ✅ AWS handles encryption and access control
+- ✅ Credentials can be rotated without code changes
+
+### 4.2 Deploy the application
 ```bash
+# Deploy the ASP.NET application with gMSA integration
 kubectl apply -f aspnet-ad-app.yaml
 ```
+
+> **Note:** If you encounter a `CrashLoopBackOff` with `/app/Program.cs: No such file or directory` error, the deployment has been updated to fix this issue. Simply redeploy:
+> ```bash
+> kubectl delete -f aspnet-ad-app.yaml
+> kubectl apply -f aspnet-ad-app.yaml
+> ```
 
 ## Step 5: Verify AD Integration
 
@@ -311,11 +329,15 @@ kubectl apply -f aspnet-ad-app.yaml
 # Check pods
 kubectl get pods -l app=aspnet-ad-app
 
-# Check service
+# Check service and LoadBalancer status
 kubectl get service aspnet-ad-service
 
-# Check logs
-kubectl logs -l app=aspnet-ad-app -f
+# Wait for LoadBalancer to get external IP (may take 2-3 minutes)
+kubectl get service aspnet-ad-service -w
+
+# Check if LoadBalancer is ready (should show EXTERNAL-IP, not <pending>)
+kubectl get service aspnet-ad-service -o wide
+
 ```
 
 ### 5.2 Test the application
@@ -332,12 +354,21 @@ echo "AD Integration Demo URL: http://$AD_APP_URL"
 
 ### 5.3 Verify gMSA functionality
 ```bash
-# Check if credentials are retrieved successfully
+# Check application logs (no output from grep is expected - this means no errors occurred)
 kubectl logs -l app=aspnet-ad-app | grep -i "secret\|credential\|error"
+
+# Better verification: Check if application is responding successfully
+kubectl logs -l app=aspnet-ad-app --tail=10
+
+# Verify the web application is working by checking HTTP response
+AD_APP_URL=$(kubectl get service aspnet-ad-service -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+curl -s http://$AD_APP_URL | grep -i "SUCCESS.*retrieved.*credentials"
 
 # Test LDAP connectivity (if configured)
 kubectl exec -it $(kubectl get pod -l app=aspnet-ad-app -o jsonpath='{.items[0].metadata.name}') -- /bin/bash
 ```
+
+> **Note:** If the grep command returns nothing, that's **good news** - it means no errors occurred during credential retrieval. The AWS SDK handles authentication silently for security reasons.
 
 ## Step 6: Advanced LDAP Operations (Optional)
 

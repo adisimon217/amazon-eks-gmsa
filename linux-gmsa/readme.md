@@ -56,8 +56,8 @@ eksctl version
 ```bash
 ##### ACTION REQUIRED - START #####
 REGION="ap-southeast-1" # AWS region where cluster will be created
-SSH_KEY="sandbox-sg-pem" # Your existing AWS key pair name
-PRIVATE_SUBNETS="subnet-05e7df1325d2227f5,subnet-04c89c31213a7cec0" # Private subnet IDs (comma separated)
+SSH_KEY="ws-default-keypair" # Your existing AWS key pair name
+PRIVATE_SUBNETS="subnet-015a4e3e09e7bbaec,subnet-0aee26bc2f76199c0" # Private subnet IDs (comma separated)
 ##### ACTION REQUIRED - END #####
 
 ##### DEFAULT VALUES - START #####
@@ -101,58 +101,6 @@ kubectl version
 ```
 
 ## Step 4: Deploy Sample ASP.NET Core Application
-
-### Create the application deployment
-Create file `aspnet-helloworld.yaml`:
-
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: aspnet-helloworld
-  namespace: default
-spec:
-  replicas: 2
-  selector:
-    matchLabels:
-      app: aspnet-helloworld
-  template:
-    metadata:
-      labels:
-        app: aspnet-helloworld
-    spec:
-      containers:
-      - name: aspnet-app
-        image: mcr.microsoft.com/dotnet/samples:aspnetapp
-        ports:
-        - containerPort: 8080
-        env:
-        - name: ASPNETCORE_URLS
-          value: "http://+:8080"
-        resources:
-          requests:
-            memory: "128Mi"
-            cpu: "100m"
-          limits:
-            memory: "256Mi"
-            cpu: "200m"
-      nodeSelector:
-        kubernetes.io/os: linux
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: aspnet-helloworld-service
-  namespace: default
-spec:
-  selector:
-    app: aspnet-helloworld
-  ports:
-  - port: 80
-    targetPort: 8080
-    protocol: TCP
-  type: LoadBalancer
-```
 
 ### Deploy the application
 ```bash

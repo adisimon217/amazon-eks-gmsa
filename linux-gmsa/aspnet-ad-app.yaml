@@ -16,7 +16,7 @@ spec:
       serviceAccountName: gmsa-service-account
       containers:
       - name: aspnet-ad-app
-        image: mcr.microsoft.com/dotnet/aspnet:8.0
+        image: mcr.microsoft.com/dotnet/sdk:8.0
         ports:
         - containerPort: 8080
         env:
@@ -30,6 +30,10 @@ spec:
         args:
           - -c
           - |
+            set -e
+            echo "Creating /app directory..."
+            mkdir -p /app
+            echo "Creating Program.cs..."
             cat > /app/Program.cs << 'EOF'
             using System.DirectoryServices;
             using System.Text.Json;
@@ -81,10 +85,10 @@ spec:
                 <div class='container'>
                     <h1>ASP.NET Core AD Integration Demo</h1>
                     <div class='status success'>
-                        ✅ Successfully retrieved gMSA credentials from AWS Secrets Manager
+                        [SUCCESS] Successfully retrieved gMSA credentials from AWS Secrets Manager
                     </div>
                     <div class='status info'>
-                        🔐 Using gMSA account for Active Directory authentication
+                        [SECURE] Using gMSA account for Active Directory authentication
                     </div>
                     
                     <h2>Authentication Details</h2>
@@ -101,7 +105,7 @@ spec:
                     
                     <h2>LDAP Connection Test</h2>
                     <div class='status info'>
-                        📡 Ready for LDAP operations using gMSA credentials
+                        [READY] Ready for LDAP operations using gMSA credentials
                     </div>
                 </div>
             </body>
@@ -137,11 +141,14 @@ spec:
               </PropertyGroup>
               <ItemGroup>
                 <PackageReference Include="AWSSDK.SecretsManager" Version="3.7.400.44" />
+                <PackageReference Include="AWSSDK.SecurityToken" Version="3.7.400.44" />
                 <PackageReference Include="System.DirectoryServices" Version="8.0.0" />
               </ItemGroup>
             </Project>
             EOF
 
+            echo "Creating project file..."
+            echo "Starting application..."
             cd /app && dotnet run --urls http://0.0.0.0:8080
         resources:
           requests:
