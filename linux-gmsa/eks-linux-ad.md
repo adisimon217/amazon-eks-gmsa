@@ -27,6 +27,7 @@ export REGION="ap-southeast-1"                # AWS region
 export GMSA_GROUP_NAME="EKS-gMSA-Users"        # AD group for gMSA access
 export GMSA_GROUP_SAM="EKSgMSAUsers"           # AD group SAM account name
 export SECRET_NAME="eks-gmsa-credentials"      # AWS Secrets Manager secret name
+export CLUSTER_NAME="linux-aspnet-demo"        # EKS cluster name
 ```
 
 ## Understanding gMSA for Linux Containers
@@ -89,11 +90,20 @@ New-ADGroup -Name $GMSA_GROUP_NAME -SamAccountName $GMSA_GROUP_SAM -GroupScope D
 # Create gMSA account
 New-ADServiceAccount -Name $GMSA_SERVICE_ACCOUNT -DnsHostName "$GMSA_SERVICE_ACCOUNT.$AD_DOMAIN_NAME" -ServicePrincipalNames "$AD_NETBIOS_NAME/$GMSA_SERVICE_ACCOUNT", "$AD_NETBIOS_NAME/$GMSA_SERVICE_ACCOUNT.$AD_DOMAIN_NAME" -PrincipalsAllowedToRetrieveManagedPassword $GMSA_GROUP_SAM
 
+# Note: For LDAP queries to work, the gMSA account may need read permissions
+# on specific AD objects. This can be configured later if needed using:
+# - Active Directory Users and Computers GUI
+# - Advanced security settings on the Domain Computers group
+# - Or by adding the gMSA to Domain Users group (broader permissions)
+
 # Create service user for gMSA retrieval
 New-ADUser -Name $GMSA_USER_ACCOUNT -AccountPassword (ConvertTo-SecureString -AsPlainText $GMSA_USER_PASSWORD -Force) -Enabled $true
 
 # Add service user to gMSA group
 Add-ADGroupMember -Identity $GMSA_GROUP_SAM -Members $GMSA_USER_ACCOUNT
+
+# Note: The eks-svc-user account should already be a member of Domain Users
+# which provides basic read permissions to Active Directory objects
 ```
 
 ### 1.2 Validate the Setup
@@ -140,7 +150,110 @@ UserPrincipalName                          :
 > Add-KdsRootKey -EffectiveImmediately
 > ```
 
-## Step 2: Store gMSA Credentials in AWS Secrets Manager
+## Step 2: Configure Network Access to Active Directory
+
+### 2.1 Get AWS Managed AD DNS servers
+```bash
+# Get your Directory ID
+DIRECTORY_ID=$(aws ds describe-directories --query 'DirectoryDescriptions[0].DirectoryId' --output text --region $REGION)
+
+# Get DNS server IPs for your Managed AD (note the output for next step)
+aws ds describe-directories --directory-ids $DIRECTORY_ID --region $REGION --query 'DirectoryDescriptions[0].DnsIpAddrs'
+
+# Example output: ["10.0.2.90", "10.0.3.94"]
+```
+
+### 2.2 Configure EKS cluster DNS
+
+**Why DNS configuration is needed:**
+EKS clusters use CoreDNS (built-in DNS service) to resolve domain names for all pods. By default, CoreDNS only knows about public domains and Kubernetes internal domains. Your private Active Directory domain (`sandbox.aws.corp.com`) is unknown to CoreDNS, so LDAP connections fail with "Connect Error".
+
+**Solution:** Configure CoreDNS to forward queries for your AD domain to the AWS Managed AD DNS servers. This is like updating your router's DNS settings to handle a private domain.
+
+```bash
+# Create CoreDNS ConfigMap to forward AD domain queries to AD DNS servers
+# Replace the DNS IPs with the ones from step 2.1
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coredns
+  namespace: kube-system
+data:
+  Corefile: |
+    .:53 {
+        errors
+        health {
+           lameduck 5s
+        }
+        ready
+        kubernetes cluster.local in-addr.arpa ip6.arpa {
+           pods insecure
+           fallthrough in-addr.arpa ip6.arpa
+           ttl 30
+        }
+        prometheus :9153
+        forward . /etc/resolv.conf {
+           max_concurrent 1000
+        }
+        cache 30
+        loop
+        reload
+        loadbalance
+    }
+    sandbox.aws.corp.com:53 {
+        errors
+        cache 30
+        forward . 10.0.2.90 10.0.3.94
+    }
+EOF
+
+# Restart CoreDNS to pick up the new configuration
+kubectl rollout restart deployment coredns -n kube-system
+```
+
+> **Important:** Replace `sandbox.aws.corp.com` with your actual domain name and `10.0.2.90 10.0.3.94` with the actual DNS server IPs from step 2.1
+
+### 2.3 Configure Security Groups
+```bash
+# Get EKS cluster security group
+CLUSTER_SG=$(aws eks describe-cluster --name $CLUSTER_NAME --region $REGION --query 'cluster.resourcesVpcConfig.clusterSecurityGroupId' --output text)
+
+# Get Managed AD security group
+AD_SG=$(aws ds describe-directories --directory-ids $DIRECTORY_ID --region $REGION --query 'DirectoryDescriptions[0].VpcSettings.SecurityGroupId' --output text)
+
+# Allow EKS cluster to reach AD on LDAP ports
+aws ec2 authorize-security-group-ingress \
+    --group-id $AD_SG \
+    --protocol tcp \
+    --port 389 \
+    --source-group $CLUSTER_SG \
+    --region $REGION
+
+aws ec2 authorize-security-group-ingress \
+    --group-id $AD_SG \
+    --protocol tcp \
+    --port 636 \
+    --source-group $CLUSTER_SG \
+    --region $REGION
+
+aws ec2 authorize-security-group-ingress \
+    --group-id $AD_SG \
+    --protocol udp \
+    --port 389 \
+    --source-group $CLUSTER_SG \
+    --region $REGION
+
+echo "Network configuration completed"
+echo "Cluster SG: $CLUSTER_SG"
+echo "AD SG: $AD_SG"   --region $REGION
+
+echo "Network configuration completed"
+echo "Cluster SG: $CLUSTER_SG"
+echo "AD SG: $AD_SG"
+```
+
+## Step 3: Store gMSA Credentials in AWS Secrets Manager
 
 > **Note:** The following commands should be run on your Linux instance (not the Windows domain management instance). Switch back to your Linux environment where you have AWS CLI configured.
 
@@ -159,7 +272,7 @@ export SECRET_NAME="eks-gmsa-credentials"
 export CLUSTER_NAME="linux-aspnet-demo"  # EKS cluster name
 ```
 
-### 2.1 Create the secret
+### 3.1 Create the secret
 ```bash
 # Create secret with gMSA credentials
 aws secretsmanager create-secret \
@@ -174,7 +287,7 @@ aws secretsmanager create-secret \
     --region $REGION
 ```
 
-### 2.2 Create IAM policy for secret access
+### 3.2 Create IAM policy for secret access
 ```bash
 cat > /tmp/gmsa-secret-policy.json << EOF
 {
@@ -200,9 +313,9 @@ aws iam create-policy \
 rm /tmp/gmsa-secret-policy.json
 ```
 
-## Step 3: Create Service Account with IAM Role
+## Step 4: Create Service Account with IAM Role
 
-### 3.1 Create IAM role for service account
+### 4.1 Create IAM role for service account
 ```bash
 # Get OIDC issuer URL
 OIDC_ISSUER=$(aws eks describe-cluster --name $CLUSTER_NAME --region $REGION --query "cluster.identity.oidc.issuer" --output text)
@@ -265,7 +378,48 @@ aws iam get-role --role-name EKS-gMSA-Role --region $REGION
 
 ## Step 4: Deploy AD-Aware ASP.NET Application
 
-### 4.1 Understanding the Application Configuration
+### 4.1 Prepare Application Source Files
+
+The ASP.NET application source code is stored in separate files for better maintainability:
+
+```bash
+# Verify the source files exist
+ls -la sample-apps/aspnet-ldap/
+# Should show: Program.cs and aspnet-ldap.csproj
+```
+
+**Why separate files?**
+- ✅ Clean, readable YAML deployment files
+- ✅ Proper syntax highlighting and IDE support
+- ✅ Version control friendly
+- ✅ Easier debugging and maintenance
+
+### 4.2 Create ConfigMap from Source Files
+
+Kubernetes ConfigMaps store configuration data that pods can consume. We'll create a ConfigMap from our source files:
+
+```bash
+# Create ConfigMap from the source files
+kubectl create configmap aspnet-ldap-source --from-file=sample-apps/aspnet-ldap/
+
+# Verify ConfigMap was created
+kubectl get configmap aspnet-ldap-source
+
+# Optional: View ConfigMap contents
+kubectl describe configmap aspnet-ldap-source
+```
+
+**How it works:**
+```
+External Files → ConfigMap → Pod Volume → Container
+```
+
+1. **Source files** in `sample-apps/aspnet-ldap/`
+2. **ConfigMap** stores file contents in Kubernetes
+3. **Pod mounts** ConfigMap as volume at `/source`
+4. **Container copies** files from `/source` to `/app` and runs the application
+
+### 4.3 Understanding the Application Configuration
 
 Before deploying, it's important to understand how the application securely retrieves gMSA credentials:
 
@@ -310,16 +464,34 @@ Pod starts → Uses service account → Assumes IAM role → Calls Secrets Manag
 - ✅ AWS handles encryption and access control
 - ✅ Credentials can be rotated without code changes
 
-### 4.2 Deploy the application
+### 4.4 Deploy the application
 ```bash
 # Deploy the ASP.NET application with gMSA integration
 kubectl apply -f aspnet-ad-app.yaml
 ```
 
-> **Note:** If you encounter a `CrashLoopBackOff` with `/app/Program.cs: No such file or directory` error, the deployment has been updated to fix this issue. Simply redeploy:
+**Expected output:**
+```
+deployment.apps/aspnet-ad-app created
+Warning: resource configmaps/aspnet-ldap-source is missing the kubectl.kubernetes.io/last-applied-configuration annotation...
+configmap/aspnet-ldap-source configured
+service/aspnet-ad-service created
+```
+
+> **Note:** The ConfigMap warning is **harmless** and expected when mixing `kubectl create` (imperative) and `kubectl apply` (declarative) commands. Kubernetes automatically patches the annotation.
+
+**What happens during deployment:**
+1. **Deployment** creates a pod with the .NET 8.0 SDK image
+2. **ConfigMap volume** mounts source files at `/source`
+3. **Init script** copies files from `/source` to `/app`
+4. **Application starts** with `dotnet run`
+
+> **Troubleshooting:** If you see `CrashLoopBackOff` with "No such file or directory" errors:
 > ```bash
-> kubectl delete -f aspnet-ad-app.yaml
-> kubectl apply -f aspnet-ad-app.yaml
+> # Recreate ConfigMap and restart deployment
+> kubectl delete configmap aspnet-ldap-source
+> kubectl create configmap aspnet-ldap-source --from-file=sample-apps/aspnet-ldap/
+> kubectl rollout restart deployment aspnet-ad-app
 > ```
 
 ## Step 5: Verify AD Integration
@@ -422,8 +594,21 @@ The `/ldap` endpoint performs the following operations:
 
 1. **Secret Access Denied**: Check IAM role and policy attachments
 2. **gMSA Authentication Failed**: Verify AD group membership and permissions
+   - **LDAP Access Denied**: gMSA account needs read permissions on AD objects. Run the dsacls commands from Step 1.1
 3. **Pod Startup Issues**: Check container logs and resource limits
 4. **Network Connectivity**: Ensure EKS can reach AD domain controllers
+5. **ConfigMap Issues**: 
+   - **Missing files**: Ensure `sample-apps/aspnet-ldap/` contains `Program.cs` and `aspnet-ldap.csproj`
+   - **Build errors**: Check for compilation errors in the source files
+   - **File not found**: Verify ConfigMap was created and mounted correctly
+   - **Empty ConfigMap**: Recreate ConfigMap if it shows no data in `kubectl describe configmap aspnet-ldap-source`
+6. **LDAP Platform Issues**:
+   - **"System.DirectoryServices is not supported on this platform"**: This occurs when using Windows-specific LDAP libraries on Linux containers. The application uses `Novell.Directory.Ldap.NETStandard` for cross-platform compatibility
+7. **LDAP Connection Issues**:
+   - **"LDAP error (Code: 91): Connect Error"**: Network connectivity issue between pod and domain controller
+     - Check if EKS cluster can reach AD domain controllers on port 389
+     - Verify security groups allow outbound LDAP traffic
+     - Test DNS resolution of domain name from pod
 
 ### Useful Commands
 
@@ -437,8 +622,22 @@ kubectl logs -l app=aspnet-ad-app | grep -i "assume\|role\|token"
 # Test secret access
 aws secretsmanager get-secret-value --secret-id eks-gmsa-credentials --region $REGION
 
+# Check ConfigMap and volume mounts
+kubectl describe configmap aspnet-ldap-source
+kubectl describe pod -l app=aspnet-ad-app
+
+# Check files in container
+kubectl exec -it $(kubectl get pod -l app=aspnet-ad-app -o jsonpath='{.items[0].metadata.name}') -- ls -la /source
+kubectl exec -it $(kubectl get pod -l app=aspnet-ad-app -o jsonpath='{.items[0].metadata.name}') -- ls -la /app
+
 # Check AD connectivity from pod
-kubectl exec -it $(kubectl get pod -l app=aspnet-ad-app -o jsonpath='{.items[0].metadata.name}') -- nslookup yourdomain.com
+kubectl exec -it $(kubectl get pod -l app=aspnet-ad-app -o jsonpath='{.items[0].metadata.name}') -- nslookup $AD_DOMAIN_NAME
+
+# Test LDAP port connectivity
+kubectl exec -it $(kubectl get pod -l app=aspnet-ad-app -o jsonpath='{.items[0].metadata.name}') -- nc -zv $AD_DOMAIN_NAME 389
+
+# Check if domain controllers are reachable
+kubectl exec -it $(kubectl get pod -l app=aspnet-ad-app -o jsonpath='{.items[0].metadata.name}') -- nslookup _ldap._tcp.$AD_DOMAIN_NAME
 ```
 
 ## Cleanup
