@@ -107,6 +107,7 @@ spec:
                     <div class='status info'>
                         [READY] Ready for LDAP operations using gMSA credentials
                     </div>
+                    <p><a href='/ldap'>Test LDAP Query: Count Domain Computers</a></p>
                 </div>
             </body>
             </html>";
@@ -123,6 +124,119 @@ spec:
                 <h1>Error</h1>
                 <p>Failed to retrieve credentials: {ex.Message}</p>
                 <p>Check AWS Secrets Manager configuration and IAM permissions.</p>
+            </body>
+            </html>";
+                    return Results.Content(errorHtml, "text/html");
+                }
+            });
+
+            app.MapGet("/ldap", async (IAmazonSecretsManager secretsManager) =>
+            {
+                try
+                {
+                    var secretName = Environment.GetEnvironmentVariable("SECRET_NAME") ?? "eks-gmsa-credentials";
+                    var response = await secretsManager.GetSecretValueAsync(new GetSecretValueRequest { SecretId = secretName });
+                    var secret = JsonSerializer.Deserialize<Dictionary<string, string>>(response.SecretString);
+                    
+                    var username = secret["username"];
+                    var password = secret["password"];
+                    var domain = secret["domain"];
+                    
+                    string ldapResult = "";
+                    string ldapStatus = "info";
+                    
+                    try
+                    {
+                        using (var entry = new DirectoryEntry($"LDAP://{domain}", username, password))
+                        using (var searcher = new DirectorySearcher(entry))
+                        {
+                            searcher.Filter = "(&(objectClass=group)(cn=Domain Computers))";
+                            searcher.PropertiesToLoad.Add("member");
+                            
+                            var result = searcher.FindOne();
+                            if (result != null)
+                            {
+                                var members = result.Properties["member"];
+                                var computerCount = members.Count;
+                                ldapResult = $"Successfully queried 'Domain Computers' group: {computerCount} computers found";
+                                ldapStatus = "success";
+                            }
+                            else
+                            {
+                                ldapResult = "Group 'Domain Computers' not found in Active Directory";
+                                ldapStatus = "warning";
+                            }
+                        }
+                    }
+                    catch (UnauthorizedAccessException)
+                    {
+                        ldapResult = "Access denied: Insufficient permissions to query Active Directory";
+                        ldapStatus = "error";
+                    }
+                    catch (DirectoryServiceException ex)
+                    {
+                        ldapResult = $"Directory service error: {ex.Message}";
+                        ldapStatus = "error";
+                    }
+                    catch (Exception ex)
+                    {
+                        ldapResult = $"Unexpected error during LDAP query: {ex.Message}";
+                        ldapStatus = "error";
+                    }
+                    
+                    var statusClass = ldapStatus == "success" ? "success" : ldapStatus == "warning" ? "info" : "error";
+                    
+                    var html = $@"
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>LDAP Query Results</title>
+                <style>
+                    body {{ font-family: Arial, sans-serif; margin: 40px; }}
+                    .container {{ max-width: 800px; margin: 0 auto; }}
+                    .status {{ padding: 10px; margin: 10px 0; border-radius: 5px; }}
+                    .success {{ background-color: #d4edda; border: 1px solid #c3e6cb; color: #155724; }}
+                    .info {{ background-color: #d1ecf1; border: 1px solid #bee5eb; color: #0c5460; }}
+                    .error {{ background-color: #f8d7da; border: 1px solid #f5c6cb; color: #721c24; }}
+                    table {{ width: 100%; border-collapse: collapse; margin: 20px 0; }}
+                    th, td {{ padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }}
+                    th {{ background-color: #f2f2f2; }}
+                </style>
+            </head>
+            <body>
+                <div class='container'>
+                    <h1>LDAP Query: Domain Computers</h1>
+                    <div class='status {statusClass}'>
+                        {ldapResult}
+                    </div>
+                    
+                    <h2>Query Details</h2>
+                    <table>
+                        <tr><th>Property</th><th>Value</th></tr>
+                        <tr><td>Target Group</td><td>Domain Computers</td></tr>
+                        <tr><td>LDAP Server</td><td>{domain}</td></tr>
+                        <tr><td>Authentication</td><td>gMSA via {username}</td></tr>
+                        <tr><td>Query Filter</td><td>(&(objectClass=group)(cn=Domain Computers))</td></tr>
+                        <tr><td>Timestamp</td><td>{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC</td></tr>
+                    </table>
+                    
+                    <p><a href='/'>&lt;- Back to Main Page</a></p>
+                </div>
+            </body>
+            </html>";
+                    
+                    return Results.Content(html, "text/html");
+                }
+                catch (Exception ex)
+                {
+                    var errorHtml = $@"
+            <!DOCTYPE html>
+            <html>
+            <head><title>LDAP Query Error</title></head>
+            <body>
+                <h1>Error</h1>
+                <p>Failed to perform LDAP query: {ex.Message}</p>
+                <p><a href='/'>&lt;- Back to Main Page</a></p>
             </body>
             </html>";
                     return Results.Content(errorHtml, "text/html");

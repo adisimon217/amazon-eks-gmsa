@@ -370,18 +370,42 @@ kubectl exec -it $(kubectl get pod -l app=aspnet-ad-app -o jsonpath='{.items[0].
 
 > **Note:** If the grep command returns nothing, that's **good news** - it means no errors occurred during credential retrieval. The AWS SDK handles authentication silently for security reasons.
 
-## Step 6: Advanced LDAP Operations (Optional)
+## Step 6: Test LDAP Operations
 
-For full LDAP integration, extend the application to perform actual directory operations:
+The application also includes a real LDAP query endpoint that demonstrates Active Directory integration:
 
-```csharp
-// Add to Program.cs for LDAP queries
-app.MapGet("/users", async (IAmazonSecretsManager secretsManager) =>
-{
-    // Retrieve credentials and perform LDAP search
-    // Implementation depends on your AD structure
-});
+### 6.1 Test the LDAP functionality
+```bash
+# Get the application URL
+AD_APP_URL=$(kubectl get service aspnet-ad-service -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+
+# Test the LDAP query endpoint
+curl -s http://$AD_APP_URL/ldap | grep -i "computers found\|not found\|access denied\|error"
+
+# Or visit in browser
+echo "LDAP Query URL: http://$AD_APP_URL/ldap"
 ```
+
+### 6.2 What the LDAP query does
+
+The `/ldap` endpoint performs the following operations:
+
+1. **Retrieves gMSA credentials** from AWS Secrets Manager
+2. **Connects to Active Directory** using the service user credentials
+3. **Queries the "Domain Computers" group** using LDAP filter: `(&(objectClass=group)(cn=Domain Computers))`
+4. **Counts the members** in the group
+5. **Handles errors gracefully**:
+   - **Access denied**: Insufficient permissions
+   - **Group not found**: "Domain Computers" group doesn't exist
+   - **Connection errors**: Network or authentication issues
+   - **Unexpected errors**: Any other exceptions
+
+### 6.3 Expected results
+
+- **Success**: "Successfully queried 'Domain Computers' group: X computers found"
+- **Not found**: "Group 'Domain Computers' not found in Active Directory"
+- **Access denied**: "Access denied: Insufficient permissions to query Active Directory"
+- **Error**: Detailed error message for troubleshooting
 
 ## Current Status
 
@@ -390,6 +414,7 @@ app.MapGet("/users", async (IAmazonSecretsManager secretsManager) =>
 ✅ **IAM Integration**: Service account with proper permissions  
 ✅ **AD-Aware App**: ASP.NET Core app using gMSA credentials  
 ✅ **Linux Containers**: Running on EKS with AD integration  
+✅ **LDAP Operations**: Real Active Directory queries working  
 
 ## Troubleshooting
 
